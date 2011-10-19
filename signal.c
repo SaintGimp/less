@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 1984-2004  Mark Nudelman
+ * Copyright (C) 1984-2008  Mark Nudelman
  *
  * You may distribute under the terms of either the GNU General Public
  * License or the Less License, as specified in the README file.
@@ -34,6 +34,7 @@ extern int linenums;
 extern int wscroll;
 extern int reading;
 extern int quit_on_intr;
+extern long jump_sline_fraction;
 
 /*
  * Interrupt signal handler.
@@ -43,6 +44,7 @@ extern int quit_on_intr;
 u_interrupt(type)
 	int type;
 {
+	bell();
 #if OS2
 	LSIGNAL(SIGINT, SIG_ACK);
 #endif
@@ -58,7 +60,7 @@ u_interrupt(type)
 		getkey();
 #endif
 	if (reading)
-		intread();
+		intread(); /* May longjmp */
 }
 
 #ifdef SIGTSTP
@@ -153,13 +155,12 @@ init_signals(on)
 #endif
 #ifdef SIGWINCH
 		(void) LSIGNAL(SIGWINCH, winch);
-#else
+#endif
 #ifdef SIGWIND
 		(void) LSIGNAL(SIGWIND, winch);
 #endif
 #ifdef SIGQUIT
 		(void) LSIGNAL(SIGQUIT, SIG_IGN);
-#endif
 #endif
 	} else
 	{
@@ -242,6 +243,7 @@ psignals()
 		if (sc_width != old_width || sc_height != old_height)
 		{
 			wscroll = (sc_height + 1) / 2;
+			calc_jump_sline();
 			screen_trashed = 1;
 		}
 	}
@@ -250,24 +252,5 @@ psignals()
 	{
 		if (quit_on_intr)
 			quit(QUIT_OK);
-		bell();
-		/*
-		 * {{ You may wish to replace the bell() with 
-		 *    error("Interrupt", NULL_PARG); }}
-		 */
-
-		/*
-		 * If we were interrupted while in the "calculating 
-		 * line numbers" loop, turn off line numbers.
-		 */
-		if (lnloop)
-		{
-			lnloop = 0;
-			if (linenums == 2)
-				screen_trashed = 1;
-			linenums = 0;
-			error("Line numbers turned off", NULL_PARG);
-		}
-
 	}
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 1984-2005  Mark Nudelman
+ * Copyright (C) 1984-2008  Mark Nudelman
  *
  * You may distribute under the terms of either the GNU General Public
  * License or the Less License, as specified in the README file.
@@ -51,6 +51,8 @@
 extern int force_open;
 extern int secure;
 extern int use_lessopen;
+extern int ctldisp;
+extern int utf_mode;
 extern IFILE curr_ifile;
 extern IFILE old_ifile;
 #if SPACES_IN_FILENAMES
@@ -468,19 +470,34 @@ fcomplete(s)
 bin_file(f)
 	int f;
 {
-	int i;
 	int n;
-	unsigned char data[64];
+	int bin_count = 0;
+	char data[256];
+	char* p;
+	char* pend;
 
 	if (!seekable(f))
 		return (0);
-	if (lseek(f, (off_t)0, 0) == BAD_LSEEK)
+	if (lseek(f, (off_t)0, SEEK_SET) == BAD_LSEEK)
 		return (0);
 	n = read(f, data, sizeof(data));
-	for (i = 0;  i < n;  i++)
-		if (binary_char(data[i]))
-			return (1);
-	return (0);
+	pend = &data[n];
+	for (p = data;  p < pend;  )
+	{
+		LWCHAR c = step_char(&p, +1, pend);
+		if (ctldisp == OPT_ONPLUS && IS_CSI_START(c))
+		{
+			do {
+				c = step_char(&p, +1, pend);
+			} while (p < pend && is_ansi_middle(c));
+		} else if (binary_char(c))
+			bin_count++;
+	}
+	/*
+	 * Call it a binary file if there are more than 5 binary characters
+	 * in the first 256 bytes of the file.
+	 */
+	return (bin_count > 5);
 }
 
 /*
@@ -492,7 +509,7 @@ seek_filesize(f)
 {
 	off_t spos;
 
-	spos = lseek(f, (off_t)0, 2);
+	spos = lseek(f, (off_t)0, SEEK_END);
 	if (spos == BAD_LSEEK)
 		return (NULL_POSITION);
 	return ((POSITION) spos);
@@ -814,20 +831,27 @@ open_altfile(filename, pf, pfd)
 	ch_ungetchar(-1);
 	if ((lessopen = lgetenv("LESSOPEN")) == NULL)
 		return (NULL);
-	if (strcmp(filename, "-") == 0)
-		return (NULL);
 	if (*lessopen == '|')
 	{
 		/*
 		 * If LESSOPEN starts with a |, it indicates 
 		 * a "pipe preprocessor".
 		 */
-#if HAVE_FILENO
-		lessopen++;
-		returnfd = 1;
-#else
+#if !HAVE_FILENO
 		error("LESSOPEN pipe is not supported", NULL_PARG);
 		return (NULL);
+#else
+		lessopen++;
+		returnfd = 1;
+		if (*lessopen == '-') {
+			/*
+			 * Lessopen preprocessor will accept "-" as a filename.
+			 */
+			lessopen++;
+		} else {
+			if (strcmp(filename, "-") == 0)
+				return (NULL);
+		}
 #endif
 	}
 
@@ -966,7 +990,7 @@ bad_file(filename)
 	register char *m = NULL;
 
 	filename = shell_unquote(filename);
-	if (is_dir(filename))
+	if (!force_open && is_dir(filename))
 	{
 		static char is_a_dir[] = " is a directory";
 

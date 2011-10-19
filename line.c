@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 1984-2005  Mark Nudelman
+ * Copyright (C) 1984-2008  Mark Nudelman
  *
  * You may distribute under the terms of either the GNU General Public
  * License or the Less License, as specified in the README file.
@@ -35,7 +35,6 @@ static int overstrike;		/* Next char should overstrike previous char */
 static int last_overstrike = AT_NORMAL;
 static int is_null_line;	/* There is no current line */
 static int lmargin;		/* Left margin */
-static int line_matches;	/* Number of search matches in this line */
 static char pendc;
 static POSITION pendpos;
 static char *end_ansi_chars;
@@ -161,9 +160,6 @@ prewind()
 	lmargin = 0;
 	if (status_col)
 		lmargin += 1;
-#if HILITE_SEARCH
-	line_matches = 0;
-#endif
 }
 
 /*
@@ -267,7 +263,7 @@ pshift(shift)
 	while (shifted <= shift && from < curr)
 	{
 		c = linebuf[from];
-		if (c == ESC && ctldisp == OPT_ONPLUS)
+		if (ctldisp == OPT_ONPLUS && IS_CSI_START(c))
 		{
 			/* Keep cumulative effect.  */
 			linebuf[to] = c;
@@ -522,7 +518,7 @@ in_ansi_esc_seq()
 	for (p = &linebuf[curr];  p > linebuf; )
 	{
 		LWCHAR ch = step_char(&p, -1, linebuf);
-		if (ch == ESC)
+		if (IS_CSI_START(ch))
 			return (1);
 		if (!is_ansi_middle(ch))
 			return (0);
@@ -591,7 +587,6 @@ store_char(ch, a, rep, pos)
 			if (a != AT_ANSI)
 				a |= AT_HILITE;
 		}
-		line_matches += matches;
 	}
 #endif
 
@@ -599,15 +594,18 @@ store_char(ch, a, rep, pos)
 	{
 		if (!is_ansi_end(ch) && !is_ansi_middle(ch)) {
 			/* Remove whole unrecognized sequence.  */
+			char *p = &linebuf[curr];
+			LWCHAR bch;
 			do {
-				--curr;
-			} while (linebuf[curr] != ESC);
+				bch = step_char(&p, -1, linebuf);
+			} while (p > linebuf && !IS_CSI_START(bch));
+			curr = p - linebuf;
 			return 0;
 		}
 		a = AT_ANSI;	/* Will force re-AT_'ing around it.  */
 		w = 0;
 	}
-	else if (ctldisp == OPT_ONPLUS && ch == ESC)
+	else if (ctldisp == OPT_ONPLUS && IS_CSI_START(ch))
 	{
 		a = AT_ANSI;	/* Will force re-AT_'ing around it.  */
 		w = 0;
@@ -941,7 +939,7 @@ do_append(ch, rep, pos)
 	} else if ((!utf_mode || is_ascii_char(ch)) && control_char((char)ch))
 	{
 	do_control_char:
-		if (ctldisp == OPT_ON || (ctldisp == OPT_ONPLUS && ch == ESC))
+		if (ctldisp == OPT_ON || (ctldisp == OPT_ONPLUS && IS_CSI_START(ch)))
 		{
 			/*
 			 * Output as a normal character.
@@ -991,9 +989,12 @@ pflushmbc()
  * Terminate the line in the line buffer.
  */
 	public void
-pdone(endline)
+pdone(endline, nextc)
 	int endline;
+	int nextc;
 {
+	int nl;
+
 	(void) pflushmbc();
 
 	if (pendc && (pendc != '\r' || !endline))
@@ -1024,23 +1025,54 @@ pdone(endline)
 	/*
 	 * Add a newline if necessary,
 	 * and append a '\0' to the end of the line.
+	 * We output a newline if we're not at the right edge of the screen,
+	 * or if the terminal doesn't auto wrap,
+	 * or if this is really the end of the line AND the terminal ignores
+	 * a newline at the right edge.
+	 * (In the last case we don't want to output a newline if the terminal 
+	 * doesn't ignore it since that would produce an extra blank line.
+	 * But we do want to output a newline if the terminal ignores it in case
+	 * the next line is blank.  In that case the single newline output for
+	 * that blank line would be ignored!)
 	 */
-	if (column < sc_width || !auto_wrap || ignaw || ctldisp == OPT_ON)
+	if (column < sc_width || !auto_wrap || (endline && ignaw) || ctldisp == OPT_ON)
 	{
 		linebuf[curr] = '\n';
 		attr[curr] = AT_NORMAL;
 		curr++;
+	} 
+	else if (ignaw && column >= sc_width)
+	{
+		/*
+		 * Terminals with "ignaw" don't wrap until they *really* need
+		 * to, i.e. when the character *after* the last one to fit on a
+		 * line is output. But they are too hard to deal with when they
+		 * get in the state where a full screen width of characters
+		 * have been output but the cursor is sitting on the right edge
+		 * instead of at the start of the next line.
+		 * So we nudge them into wrapping by outputting the next
+		 * character plus a backspace. (This wouldn't be right for
+		 * "!auto_wrap" terminals, but they always end up in the 
+		 * branch above.)
+		 */
+		linebuf[curr] = nextc;
+		attr[curr++] = AT_NORMAL;
+		linebuf[curr] = '\b'; 
+		attr[curr++] = AT_NORMAL;
 	}
 	linebuf[curr] = '\0';
 	attr[curr] = AT_NORMAL;
+}
 
-#if HILITE_SEARCH
-	if (status_col && line_matches > 0)
-	{
-		linebuf[0] = '*';
-		attr[0] = AT_NORMAL|AT_HILITE;
-	}
-#endif
+/*
+ *
+ */
+	public void
+set_status_col(c)
+	char c;
+{
+	linebuf[0] = c;
+	attr[0] = AT_NORMAL|AT_HILITE;
 }
 
 /*
@@ -1093,9 +1125,10 @@ null_line()
  * {{ This is supposed to be more efficient than forw_line(). }}
  */
 	public POSITION
-forw_raw_line(curr_pos, linep)
+forw_raw_line(curr_pos, linep, line_lenp)
 	POSITION curr_pos;
 	char **linep;
+	int *line_lenp;
 {
 	register int n;
 	register int c;
@@ -1131,6 +1164,8 @@ forw_raw_line(curr_pos, linep)
 	linebuf[n] = '\0';
 	if (linep != NULL)
 		*linep = linebuf;
+	if (line_lenp != NULL)
+		*line_lenp = n;
 	return (new_pos);
 }
 
@@ -1139,9 +1174,10 @@ forw_raw_line(curr_pos, linep)
  * {{ This is supposed to be more efficient than back_line(). }}
  */
 	public POSITION
-back_raw_line(curr_pos, linep)
+back_raw_line(curr_pos, linep, line_lenp)
 	POSITION curr_pos;
 	char **linep;
+	int *line_lenp;
 {
 	register int n;
 	register int c;
@@ -1202,5 +1238,7 @@ back_raw_line(curr_pos, linep)
 	}
 	if (linep != NULL)
 		*linep = &linebuf[n];
+	if (line_lenp != NULL)
+		*line_lenp = size_linebuf - 1 - n;
 	return (new_pos);
 }

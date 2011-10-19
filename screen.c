@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 1984-2005  Mark Nudelman
+ * Copyright (C) 1984-2008  Mark Nudelman
  *
  * You may distribute under the terms of either the GNU General Public
  * License or the Less License, as specified in the README file.
@@ -163,6 +163,7 @@ static char
 	*sc_home,		/* Cursor home */
 	*sc_addline,		/* Add line, scroll down following lines */
 	*sc_lower_left,		/* Cursor to last line, first column */
+	*sc_return,		/* Cursor to beginning of current line */
 	*sc_move,		/* General cursor positioning */
 	*sc_clear,		/* Clear screen */
 	*sc_eol_clear,		/* Clear to end of line */
@@ -232,6 +233,7 @@ extern int wscroll;
 extern int screen_trashed;
 extern int tty;
 extern int top_scroll;
+extern int oldbot;
 #if HILITE_SEARCH
 extern int hilite_search;
 #endif
@@ -621,7 +623,25 @@ ltget_env(capname)
 	char *capname;
 {
 	char name[16];
+	char *s;
 
+	s = lgetenv("LESS_TERMCAP_DEBUG");
+	if (s != NULL && *s != '\0')
+	{
+		struct env { struct env *next; char *name; char *value; };
+		static struct env *envs = NULL;
+		struct env *p;
+		for (p = envs;  p != NULL;  p = p->next)
+			if (strcmp(p->name, capname) == 0)
+				return p->value;
+		p = (struct env *) ecalloc(1, sizeof(struct env));
+		p->name = save(capname);
+		p->value = (char *) ecalloc(strlen(capname)+3, sizeof(char));
+		sprintf(p->value, "<%s>", capname);
+		p->next = envs;
+		envs = p;
+		return p->value;
+	}
 	strcpy(name, "LESS_TERMCAP_");
 	strcat(name, capname);
 	return (lgetenv(name));
@@ -1127,7 +1147,7 @@ get_term()
  	if ((term = lgetenv("TERM")) == NULL)
  		term = DEFAULT_TERM;
 	hardcopy = 0;
- 	if (tgetent(termbuf, term) <= 0)
+ 	if (tgetent(termbuf, term) != TGETENT_OK)
  		hardcopy = 1;
  	if (ltgetflag("hc"))
 		hardcopy = 1;
@@ -1281,6 +1301,13 @@ get_term()
 		sp += strlen(sp) + 1;
 	}
 	sc_lower_left = cheaper(t1, t2, "\r");
+
+	/*
+	 * Get carriage return string.
+	 */
+	sc_return = ltgetstr("cr", &sp);
+	if (sc_return == NULL)
+		sc_return = "\r";
 
 	/*
 	 * Choose between using "al" or "sr" ("add line" or "scroll reverse")
@@ -1523,7 +1550,8 @@ init()
 		 */
 		for (i = 1; i < sc_height; i++)
 			putchr('\n');
-	}
+	} else
+		line_left();
 #else
 #if MSDOS_COMPILER==WIN32C
 	if (!no_init)
@@ -1760,7 +1788,7 @@ win32_scroll_up(n)
 
 	/* Move the source text to the top of the screen. */
 	new_org.X = rcSrc.Left;
-	new_org.Y = 0;
+	/* new_org.Y = rcClip.top; -- doesn't compile under MSVC6 */
 
 	/* Fill the right character and attributes. */
 	fillchar.Char.AsciiChar = ' ';
@@ -1797,6 +1825,37 @@ lower_left()
 #else
 	flush();
 	_settextposition(sc_height, 1);
+#endif
+}
+
+/*
+ * Move cursor to left position of current line.
+ */
+	public void
+line_left()
+{
+#if !MSDOS_COMPILER
+	tputs(sc_return, 1, putchr);
+#else
+	int row;
+	flush();
+#if MSDOS_COMPILER==WIN32C
+	{
+		CONSOLE_SCREEN_BUFFER_INFO scr;
+		GetConsoleScreenBufferInfo(con_out, &scr);
+		row = scr.dwCursorPosition.Y - scr.srWindow.Top + 1;
+	}
+#else
+#if MSDOS_COMPILER==BORLANDC || MSDOS_COMPILER==DJGPPC
+		row = wherey();
+#else
+	{
+		struct rccoord tpos = _gettextposition();
+		row = tpos.row;
+	}
+#endif
+#endif
+	_settextposition(row, 1);
 #endif
 }
 
@@ -2108,7 +2167,11 @@ clear_bot()
 	 * the mode while we do the clear.  Some terminals fill the
 	 * cleared area with the current attribute.
 	 */
-	lower_left();
+	if (oldbot)
+		lower_left();
+	else
+		line_left();
+
 	if (attrmode == AT_NORMAL)
 		clear_eol_bot();
 	else
@@ -2185,7 +2248,10 @@ at_exit()
 at_switch(attr)
 	int attr;
 {
-	if (apply_at_specials(attr) != attrmode)
+	int new_attrmode = apply_at_specials(attr);
+	int ignore_modes = AT_ANSI;
+
+	if ((new_attrmode & ~ignore_modes) != (attrmode & ~ignore_modes))
 	{
 		at_exit();
 		at_enter(attr);
@@ -2402,5 +2468,35 @@ WIN32getch(tty)
 	 */
 	pending_scancode = (ascii == 0x00);
 	return ((char)ascii);
+}
+#endif
+
+#if MSDOS_COMPILER
+/*
+ */
+	public void
+WIN32setcolors(fg, bg)
+	int fg;
+	int bg;
+{
+	SETCOLORS(fg, bg);
+}
+
+/*
+ */
+	public void
+WIN32textout(text, len)
+	char *text;
+	int len;
+{
+#if MSDOS_COMPILER==WIN32C
+	DWORD written;
+	WriteConsole(con_out, text, len, &written, NULL);
+#else
+	char c = text[len];
+	text[len] = '\0';
+	cputs(text);
+	text[len] = c;
+#endif
 }
 #endif
