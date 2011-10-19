@@ -174,6 +174,7 @@ flush()
 						 */
 						p++;
 						anchor = p_next = p;
+						at = 0;
 						WIN32setcolors(nm_fg_color, nm_bg_color);
 						continue;
 					}
@@ -272,8 +273,13 @@ flush()
 						break;
 					if (at & 1)
 					{
+#if MSDOS_COMPILER==WIN32C
+							fg |= FOREGROUND_INTENSITY;
+							bg |= BACKGROUND_INTENSITY;
+#else
 							fg = bo_fg_color;
 							bg = bo_bg_color;
+#endif
 					} else if (at & 2)
 					{
 							fg = so_fg_color;
