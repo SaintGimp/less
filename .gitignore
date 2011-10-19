@@ -1,0 +1,4 @@
+makefile
+defines.h
+*.obj
+*.exe
