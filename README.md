@@ -1,0 +1,1 @@
+This is a fork of Mark Nudelman's [less file pager](http://www.greenwoodsoftware.com/less/) with fixes to make color rendering work better on Windows.  I've submitted the fix back to Mark but I don't know when/if it will be accepted.
